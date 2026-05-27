@@ -122,14 +122,49 @@ struct CollectiveBuilder<
                 "SM120 planar-complex requires ClusterShape<_1,_1,_1> — consumer "
                 "Blackwell does not support TMA multicast or cluster > 1.");
 
-  // Phase 4b.1 placeholder. Replaced in Phase 4b.2 with the real
-  // CollectiveMma<MainloopSm120TmaWarpSpecializedPlanarComplex<...>, ...>.
-  // Until then, instantiating this specialization fails with a clear message.
+  // Phase 4b.1-4b.4 placeholder. As of the Phase 4b.4 integration assessment
+  // (commit 2451bf80 → this), the CollectiveOp body is INTENTIONALLY left as a
+  // static_assert. Reason: see Phase 4b.4 scope re-discovery in CLAUDE.md —
+  // there is no kernel-layer GemmUniversal specialization for any CUTLASS-3.x
+  // planar-complex mainloop in upstream 4.5.2 (verified by grep — even the
+  // SM100 planar mainloop has no corresponding kernel-layer driver, which is
+  // why no SM100 planar test target builds). Wiring this CollectiveOp without
+  // a matching kernel-layer template just pushes the static_assert one layer
+  // up to GemmUniversal's "no specialization found" fall-through, with no
+  // benefit to the integration path.
+  //
+  // What it would look like once the kernel-layer template exists (Phase 5+):
+  //
+  //   using DispatchPolicy = MainloopSm120TmaWarpSpecializedPlanarComplex<
+  //       PipelineStages, SchedulerStages, ClusterShape_MNK,
+  //       KernelTmaWarpSpecialized1SmPlanarComplexSm120>;
+  //   using TiledMma = decltype(cute::make_tiled_mma(  // see Phase 5 notes
+  //       cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
+  //       Layout<Shape<_2,_2,_1>>{}));
+  //   using TiledMmaPair = detail::Sm120CollectiveMmaPlanarComplexTiledMmaType<TiledMma, TiledMma>;
+  //   using GmemTiledCopyA = SM90_TMA_LOAD;   // sm_120: no multicast
+  //   using GmemTiledCopyB = SM90_TMA_LOAD;
+  //   using SmemLayoutAtomA = /* swizzle pattern for bf16 K-major */;
+  //   using SmemLayoutAtomB = /* swizzle pattern for bf16 K-major */;
+  //   using SmemCopyAtomA = Copy_Atom<SM75_U16x8_LDSM_T, ElementA>;
+  //   using SmemCopyAtomB = Copy_Atom<SM75_U16x8_LDSM_T, ElementB>;
+  //   using CollectiveOp = CollectiveMma<DispatchPolicy, TileShape_MNK,
+  //                                       ElementA, TagToStrideA_t<GmemLayoutATag>,
+  //                                       ElementB, TagToStrideB_t<GmemLayoutBTag>,
+  //                                       TiledMmaPair,
+  //                                       GmemTiledCopyA, SmemLayoutAtomA, SmemCopyAtomA, TransformA,
+  //                                       GmemTiledCopyB, SmemLayoutAtomB, SmemCopyAtomB, TransformB>;
   static_assert(cutlass::detail::dependent_false<ArchTag>,
-                "SM120 planar-complex CollectiveBuilder skeleton (cmm-cutlass "
-                "Phase 4b.1): the dispatch policy and schedule tag are defined, "
-                "but the CollectiveOp body lands in Phase 4b.2 (port of "
-                "sm100_mma_warpspecialized_planar_complex.hpp to SM120).");
+                "SM120 planar-complex CollectiveBuilder (cmm-cutlass Phase 4b): "
+                "schedule tag, dispatch policy, collective MMA mainloop, and a "
+                "register-accumulator planar epilogue are all in place. "
+                "INTEGRATION GAP: upstream CUTLASS 4.5.2 has no kernel-layer "
+                "GemmUniversal specialization for any CUTLASS-3.x planar-complex "
+                "mainloop (including SM100). Phase 5 needs to author one "
+                "(estimated ~500-1000 lines, sibling of sm90_gemm_tma_"
+                "warpspecialized_cooperative.hpp adapted for planar accumulator "
+                "shape). See CLAUDE.md for the full Phase 4b status + Phase 5 "
+                "scope.");
 
   using CollectiveOp = void; // unreachable — static_assert above traps first
 };
