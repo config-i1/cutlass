@@ -82,6 +82,9 @@
 #include "cutlass/gemm/collective/sm100_mma_array_warpspecialized_interleaved_complex_tf32.hpp"
 #include "cutlass/gemm/collective/sm100_mma_warpspecialized_planar_complex.hpp"
 #include "cutlass/gemm/collective/sm100_mma_array_warpspecialized_planar_complex.hpp"
+// Local fork addition (cmm-cutlass Phase 4b.2): SM120 consumer-Blackwell
+// planar-complex collective MMA.
+#include "cutlass/gemm/collective/sm120_mma_warpspecialized_planar_complex.hpp"
 #include "cutlass/gemm/collective/sm120_sparse_mma_tma.hpp"
 #include "cutlass/gemm/collective/sm120_blockscaled_sparse_mma_tma.hpp"
 #endif // !defined(__CUDACC_RTC__)
