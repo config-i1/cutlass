@@ -65,10 +65,17 @@ class CollectiveEpilogue {
 #include "sm90_epilogue_tma_warpspecialized.hpp"
 #include "sm90_epilogue_tma_warpspecialized_bias_elementwise.hpp"
 #include "sm90_epilogue_array_tma_warpspecialized.hpp"
-#include "sm100_epilogue_nosmem.hpp"  
-#include "sm100_epilogue_array_nosmem.hpp"  
-#include "sm100_epilogue_tma_warpspecialized.hpp" 
-#include "sm100_epilogue_array_tma_warpspecialized.hpp" 
+#include "sm100_epilogue_nosmem.hpp"
+#include "sm100_epilogue_array_nosmem.hpp"
+#include "sm100_epilogue_tma_warpspecialized.hpp"
+#include "sm100_epilogue_array_tma_warpspecialized.hpp"
+// Planar-complex SM100 epilogues (the source files ship in CUTLASS 4.5.2
+// but were missing from the include hub — without these the
+// `cutlass::epilogue::PlanarComplexTmaWarpSpecialized1Sm` /  ...2Sm
+// schedule tags fail to find a CollectiveEpilogue specialization).
+#include "sm100_epilogue_planar_complex_tma_warpspecialized.hpp"
+#include "sm100_epilogue_array_planar_complex_tma_warpspecialized.hpp"
+#include "sm100_epilogue_array_planar_complex_nosmem.hpp"
 //
 // Conv
 //
