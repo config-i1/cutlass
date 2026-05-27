@@ -76,6 +76,10 @@ class CollectiveEpilogue {
 #include "sm100_epilogue_planar_complex_tma_warpspecialized.hpp"
 #include "sm100_epilogue_array_planar_complex_tma_warpspecialized.hpp"
 #include "sm100_epilogue_array_planar_complex_nosmem.hpp"
+// Local fork addition (cmm-cutlass Phase 4b.3): SM120 planar-complex
+// register-accumulator default epilogue, sibling of DefaultEpilogue.
+// Pairs with cutlass/gemm/collective/sm120_mma_warpspecialized_planar_complex.hpp.
+#include "sm120_default_epilogue_planar_complex.hpp"
 //
 // Conv
 //
