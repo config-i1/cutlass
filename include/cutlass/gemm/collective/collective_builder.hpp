@@ -60,6 +60,9 @@
 #include "cutlass/gemm/collective/builders/sm100_interleaved_complex_umma_builder.inl"
 #include "cutlass/gemm/collective/builders/sm100_9xBF16_interleaved_complex_umma_builder.inl"
 #include "cutlass/gemm/collective/builders/sm100_planar_complex_umma_builder.inl"
+// Local fork addition (cmm-cutlass Phase 4b): SM120 (consumer Blackwell)
+// planar-complex builder. Skeleton in 4b.1; full implementation in 4b.2.
+#include "cutlass/gemm/collective/builders/sm120_planar_complex_mma_builder.inl"
 #endif
 
 /////////////////////////////////////////////////////////////////////////////////////////////////

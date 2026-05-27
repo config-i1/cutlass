@@ -967,6 +967,16 @@ struct KernelSparseTmaWarpSpecializedMxf4Sm120           final : KernelScheduleS
 struct KernelSparseTmaWarpSpecializedMxf8f6f4Sm120       final : KernelScheduleSparseMxf8f6f4Sm120 { };
 struct KernelSparseTmaWarpSpecializedMxf8f6f4Acc2x4Sm120 final : KernelScheduleSparseMxf8f6f4Sm120, KernelScheduleAcc2x4Sm120 { };
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+// SM120 Planar Complex GEMM Dispatch Policies
+//
+// Local fork addition (cmm-cutlass Phase 4b): consumer-Blackwell sibling of
+// KernelTmaWarpSpecialized1SmPlanarComplexSm100. sm_120 has TMA but no
+// multicast, so only the 1Sm variant exists (no 2Sm cluster tag).
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+struct KernelScheduleSm120PlanarComplexGemm : KernelScheduleSm120 {};
+struct KernelTmaWarpSpecialized1SmPlanarComplexSm120 final : KernelSchedule1Sm, KernelScheduleSm120PlanarComplexGemm { };
+
 //////////////////////////////////////////////////////////////////////////////
 
 //
@@ -1457,6 +1467,29 @@ struct MainloopSm120TmaWarpSpecialized {
   using Schedule = KernelSchedule_;
   constexpr static int PipelineAsyncMmaStages = 0;
   using ArchTag = arch::Sm120;
+};
+
+// Local fork addition (cmm-cutlass Phase 4b): SM120 planar-complex sibling
+// of MainloopSm100TmaUmmaWarpSpecializedPlanarComplex. Same field set as
+// MainloopSm120TmaWarpSpecialized (the SM120 regular-GEMM policy this is
+// modelled on) plus IsOverlappingAccum=false to match the planar-complex
+// invariant. Schedule must derive from KernelScheduleSm120PlanarComplexGemm.
+template<
+  int Stages_,
+  int SchedulerPipelineStageCount_,
+  class ClusterShape_ = Shape<_1,_1,_1>,
+  class KernelSchedule_ = KernelTmaWarpSpecialized1SmPlanarComplexSm120
+>
+struct MainloopSm120TmaWarpSpecializedPlanarComplex {
+  constexpr static int Stages = Stages_;
+  constexpr static int SchedulerPipelineStageCount = SchedulerPipelineStageCount_;
+  using ClusterShape = ClusterShape_;
+  using Schedule = KernelSchedule_;
+  constexpr static int PipelineAsyncMmaStages = 0;
+  constexpr static bool IsOverlappingAccum = false;
+  using ArchTag = arch::Sm120;
+  static_assert(cute::is_base_of_v<KernelScheduleSm120PlanarComplexGemm, KernelSchedule_>,
+                "MainloopSm120TmaWarpSpecializedPlanarComplex's KernelSchedule must derive from KernelScheduleSm120PlanarComplexGemm");
 };
 
 template<
