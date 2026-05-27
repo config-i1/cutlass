@@ -93,6 +93,42 @@ using DefaultGemmCbfloat16Kernel = typename DefaultGemmPlanarComplexUniversal<
 >::GemmKernel;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
+// Bf16-output variant: same TN-layout / fp32 accumulator as
+// DefaultGemmCbfloat16Kernel, but the epilogue writes bf16 directly,
+// avoiding a downstream fp32 -> bf16 cast at the Python boundary. fp32
+// accumulation inside the kernel is unchanged. Validated by
+// test/unit/gemm/device/gemm_cbfloat16_bf16_f32_tensor_op_sm80.cu
+// (the bf16t_bf16n_bf16n_tensor_op_f32_16816 case).
+
+using DefaultGemmCbfloat16Bf16OutKernel = typename DefaultGemmPlanarComplexUniversal<
+    cutlass::bfloat16_t,
+    cutlass::layout::RowMajor,
+    cutlass::ComplexTransform::kNone,
+    8,
+    cutlass::bfloat16_t,
+    cutlass::layout::ColumnMajor,
+    cutlass::ComplexTransform::kNone,
+    8,
+    cutlass::bfloat16_t,                                          // C output element
+    cutlass::layout::RowMajor,
+    float,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<128, 128, 32>,
+    cutlass::gemm::GemmShape<64, 64, 32>,
+    cutlass::gemm::GemmShape<16, 8, 16>,
+    cutlass::epilogue::thread::LinearCombinationPlanarComplex<
+        cutlass::bfloat16_t,                                      // epilogue output element
+        4,
+        float,
+        float
+    >,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    3,
+    cutlass::arch::OpMultiplyAdd
+>::GemmKernel;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
 
 } // namespace kernel
 
@@ -101,6 +137,7 @@ namespace device {
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 using GemmCbfloat16 = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Kernel>;
+using GemmCbfloat16Bf16Out = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Bf16OutKernel>;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
