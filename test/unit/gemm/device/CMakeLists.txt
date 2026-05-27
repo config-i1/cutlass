@@ -557,6 +557,7 @@ cutlass_test_unit_gemm_device_add_executable(
   gemm_planar_complex_f16_f16_f32_tensor_op_sm70.cu
   gemm_planar_complex_f16_f16_f32_tensor_op_sm75.cu
   gemm_planar_complex_f16_f16_f32_tensor_op_sm80.cu
+  gemm_cbfloat16_bf16_f32_tensor_op_sm80.cu
 )
 
 cutlass_test_unit_gemm_device_add_executable(
