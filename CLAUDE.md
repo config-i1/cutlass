@@ -31,7 +31,22 @@ grep -rln "MainloopSm100TmaUmmaWarpSpecializedPlanarComplex" include/cutlass/gem
 
 This is why none of the existing `sm100_gemm_planar_*` test files (`test/unit/gemm/device/sm100_gemm_planar_*.cu`) are registered into any `cutlass_test_unit_gemm_device_*` CMakeLists target — there's no kernel layer to compose mainloop + epilogue + scheduler through. The 4b.3 missing-`#include` fix in `collective_epilogue.hpp` for `sm100_epilogue_planar_complex_tma_warpspecialized.hpp` (also added in this fork) lets the SM100 *epilogue* be selected at the builder level, but a full SM100 planar `GemmUniversal` still can't be instantiated.
 
-Phase 5 (multi-day standalone work) would author this kernel-layer template. Approximate scope: ~500-1000 lines, sibling of `sm90_gemm_tma_warpspecialized_cooperative.hpp` (892 lines), adapted for the planar accumulator shape `(MMA, MMA_M, MMA_N, 2)` and the dual-output epilogue dispatch. The Phase 4b.1 builder skeleton's `static_assert` placeholder body has the exact `CollectiveOp` typedef sketch that Phase 5 would substitute in.
+Phase 5 (in progress as of date this section was last updated) authors this kernel-layer template. See "Phase 5 design (5.1 analysis output)" below for the chosen architecture.
+
+### Phase 5 design (5.1 analysis output)
+
+After reading the full 892-line `sm90_gemm_tma_warpspecialized_cooperative.hpp` template, the SM90 cooperative kernel-layer turns out to be a poor fit for our Phase 4b deliverables. It expects an **SM90-style epilogue** with `LoadPipeline`/`StorePipeline`/`store()` method, but our Phase 4b.3 epilogue is **DefaultEpilogue-style** with `operator()` taking all args at once, no pipelines. The two APIs are structurally incompatible.
+
+Of the two paths considered:
+
+| Path | What | Cost |
+|---|---|---|
+| **A** Restructure Phase 4b.3 to SM90 epilogue API | Rewrites 4b.3 (~600 lines) + writes cooperative kernel layer (~800 lines) = ~1400 lines | High |
+| **B** (chosen) Simpler kernel-layer using DefaultEpilogue API | ~350-450 line kernel layer; 1 producer warp + 1 consumer warp group; no epi pipelines, no order barrier, no throttle; static persistent scheduler. Keeps 4b.3 as-is | Lower |
+
+**Path B chosen.** Reasons: (1) preserves Phase 4b.3 work; (2) much smaller surface for first-runnable kernel; (3) consistent with Phase 4b.3's deliberate DefaultEpilogue-style choice; (4) TMA-store perf optimization is a Phase 6 frontier.
+
+**Phase 5.2 deliverable target:** `include/cutlass/gemm/kernel/sm120_gemm_warpspecialized_planar_complex.hpp`. Producer warp loops over work tiles calling `mainloop.load()`. Consumer warp group allocates `(MMA, MMA_M, MMA_N, 2)` accumulator (via two `partition_fragment_C` calls composed into one rank-4 view, or via a custom partition helper), calls `mainloop.mma()` once per tile, calls `epilogue()` directly. `StaticPersistentTileScheduler` to match sm_120's smaller SM count.
 
 ### Open architectural question (also for Phase 5)
 
