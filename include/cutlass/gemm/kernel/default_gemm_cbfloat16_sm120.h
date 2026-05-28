@@ -31,56 +31,143 @@
 
 /*!
     \file
-    \brief PLACEHOLDER — Blackwell-consumer (SM120, RTX 50-series) planar-
-           complex bf16 GEMM instantiation target.
+    \brief Blackwell-consumer (SM120, RTX 50-series) planar-complex bf16 GEMM.
 
-    Sibling of default_gemm_cbfloat16.h (Ampere) and
-    default_gemm_cbfloat16_sm100.h (Blackwell data-center). This file marks
-    the integration target for the SM120 planar-complex bf16 GEMM but does
-    NOT yet expose a usable `cutlass::gemm::device::GemmCbfloat16Sm120`.
+    Sibling of default_gemm_cbfloat16.h (Ampere/SM80) and
+    default_gemm_cbfloat16_sm100.h (Blackwell DC/SM100).
 
-    Phase 4b status (as of commit 2451bf80):
-      - 4b.1: schedule tag + dispatch policy + builder skeleton ✓
-      - 4b.2: collective MMA mainloop (register-accumulator, TMA-loaded, 4-plane,
-              planar 4-MMA pattern with operand-level negation) ✓
-      - 4b.3: register-accumulator default planar epilogue ✓
-      - 4b.4: INTEGRATION GAP — see CLAUDE.md "Phase 4b status" section
+    Built on the Phase 5 SM120 planar-complex stack:
+      - dispatch_policy.hpp:        MainloopSm120TmaWarpSpecializedPlanarComplex
+                                    + KernelTmaWarpSpecialized1SmPlanarComplexSm120
+      - sm120_mma_warpspecialized_planar_complex.hpp:  collective MMA
+      - sm120_default_epilogue_planar_complex.hpp:     register-acc epilogue
+      - sm120_gemm_warpspecialized_planar_complex.hpp: kernel-layer GemmUniversal
+      - sm120_planar_complex_mma_builder.inl:          CollectiveBuilder hook
 
-    The blocker: upstream CUTLASS 4.5.2 has no kernel-layer GemmUniversal
-    specialization for any CUTLASS-3.x planar-complex mainloop. Verified by
-    `grep -rln "MainloopSm100TmaUmmaWarpSpecializedPlanarComplex"
-        include/cutlass/gemm/kernel/` returning no kernel-layer hits even for
-    the SM100 planar mainloop. Authoring the kernel-layer template is a
-    ~500-1000 line standalone milestone (sibling of
-    sm90_gemm_tma_warpspecialized_cooperative.hpp adapted for the planar
-    accumulator shape (MMA, MMA_M, MMA_N, 2)).
+    Variant exposed initially (Phase 5.3 — single tile, expanded after first
+    bench in Phase 5.4/5.5):
+      GemmCbfloat16Sm120  — 1Sm  cluster<1,1,1>, 128x128x32 MMA tile, 3 stages.
 
-    Once that lands, this file would expose:
+    Output: bf16, RowMajor C (which becomes ColumnMajor inside the kernel —
+    same transpose trap as the SM80 path; see CLAUDE.md), fp32 accumulator.
 
-      using DefaultGemmCbfloat16Sm120Kernel = typename
-        cbfloat16_sm120_detail::SmBuild<
-          cute::Shape<cute::_128, cute::_128, cute::_32>,   // 100KB-fit tile
-          cute::Shape<cute::_1,   cute::_1,   cute::_1>,    // sm_120: no cluster
-          1                                                   // 1Sm only
-        >::GemmKernel;
-
-      using GemmCbfloat16Sm120 = GemmUniversalAdapter<DefaultGemmCbfloat16Sm120Kernel>;
-
-    plus a small tile family analogous to the SM100 header's variants. Output
-    would be bf16, fp32 accumulator, matching the GemmCbfloat16Bf16Out
-    contract from default_gemm_cbfloat16.h.
-
-    The expected SMEM budget on consumer Blackwell is 101 KB/block (vs the
-    232 KB available on SM100), so the tile shapes shipped here will be a
-    subset of the SM100 variants — likely 128x128x32, 64x128x32, 128x64x32,
-    and 64x64x32, all with 2-3 pipeline stages.
+    Build note: requires --gpu-architecture=sm_120 (or sm_120a) and a runtime
+    sm_120 device. The kernel will JIT-decline to instantiate on other archs
+    via the planar mainloop's GmemTiledCopy = SM90_TMA_LOAD requirement.
 */
 
 #pragma once
 
-// Intentionally empty body. This is a Phase 4b.4 documentation placeholder
-// (see file-level comment above). Including this header is safe; instantiating
-// `cutlass::gemm::device::GemmCbfloat16Sm120` (which is not declared here) is
-// blocked until the kernel-layer template lands in Phase 5.
-
 #include "cutlass/cutlass.h"
+#include "cutlass/cbfloat16.h"
+#include "cutlass/numeric_types.h"
+
+#include "cute/tensor.hpp"
+#include "cute/atom/mma_atom.hpp"
+
+#include "cutlass/arch/mma_sm80.h"
+#include "cutlass/gemm/device/gemm_universal_adapter.h"
+#include "cutlass/gemm/kernel/gemm_universal.hpp"
+#include "cutlass/gemm/collective/collective_builder.hpp"
+#include "cutlass/epilogue/dispatch_policy.hpp"
+#include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/epilogue/collective/sm120_default_epilogue_planar_complex.hpp"
+#include "cutlass/epilogue/thread/linear_combination.h"
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace cutlass {
+namespace gemm {
+namespace kernel {
+namespace cbfloat16_sm120_detail {
+
+using ElementA = cutlass::bfloat16_t;
+using TransformA = cute::identity;
+using ElementPairA = cute::tuple<ElementA, TransformA>;
+using LayoutA = cutlass::layout::RowMajor;
+
+using ElementB = cutlass::bfloat16_t;
+using TransformB = cute::identity;
+using ElementPairB = cute::tuple<ElementB, TransformB>;
+using LayoutB = cutlass::layout::ColumnMajor;
+
+using ElementAccumulator = float;
+using ElementC = cutlass::bfloat16_t;
+using LayoutC = cutlass::layout::RowMajor;
+
+constexpr int AlignmentA = 8;
+constexpr int AlignmentB = 8;
+constexpr int AlignmentC = 8;
+
+// SM120 planar bf16 builder helper: given a static MmaTileShape (the TileShape
+// the kernel operates on) + ClusterShape (must be <1,1,1>), produce the
+// GemmKernel type via:
+//   1. CollectiveMainloop = SM120 planar bf16 collective builder
+//   2. CollectiveEpilogue = the Phase 4b.3 register-accumulator default planar
+//      epilogue (constructed directly, not via the epilogue CollectiveBuilder —
+//      no SM120 planar epilogue builder exists yet, and the direct construction
+//      is simpler for the single supported variant)
+//   3. GemmUniversal = the Phase 5.2 SM120 planar kernel-layer
+
+template <class MmaTileShape, class ClusterShape>
+struct SmBuild {
+  using MainloopSchedule = cutlass::gemm::KernelTmaWarpSpecialized1SmPlanarComplexSm120;
+
+  using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+      cutlass::arch::Sm120,
+      cutlass::arch::OpClassTensorOp,
+      ElementPairA, LayoutA, AlignmentA,
+      ElementPairB, LayoutB, AlignmentB,
+      ElementAccumulator,
+      MmaTileShape,
+      ClusterShape,
+      cutlass::gemm::collective::StageCountAuto,
+      MainloopSchedule
+  >::CollectiveOp;
+
+  // Thread epilogue op: identity LinearCombination (alpha=1, beta=0) over bf16
+  // accumulator → bf16 output. Used per-plane independently by the planar
+  // epilogue (see sm120_default_epilogue_planar_complex.hpp).
+  using ThreadEpilogueOp = cutlass::epilogue::thread::LinearCombination<
+      ElementC, AlignmentC, ElementAccumulator, ElementAccumulator>;
+
+  using CollectiveEpilogue = cutlass::epilogue::collective::Sm120PlanarComplexDefaultEpilogue<
+      ElementC,
+      cutlass::gemm::TagToStrideC_t<LayoutC>,
+      cutlass::gemm::TagToStrideC_t<LayoutC>,
+      ThreadEpilogueOp,
+      cutlass::epilogue::PlanarComplexDefaultSm120>;
+
+  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+      cute::Shape<int, int, int, int>,
+      CollectiveMainloop,
+      CollectiveEpilogue
+  >;
+};
+
+} // namespace cbfloat16_sm120_detail
+
+// Variant typedef (initially: just one variant for Phase 5.3 iteration).
+// Phase 5.5 expands to a tile family analogous to the SM100 header once the
+// first variant compiles + runs.
+using DefaultGemmCbfloat16Sm120Kernel = typename
+    cbfloat16_sm120_detail::SmBuild<
+        cute::Shape<cute::_128, cute::_128, cute::_32>,
+        cute::Shape<cute::_1, cute::_1, cute::_1>
+    >::GemmKernel;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+} // namespace kernel
+
+namespace device {
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+using GemmCbfloat16Sm120 = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Sm120Kernel>;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+} // namespace device
+} // namespace gemm
+} // namespace cutlass
