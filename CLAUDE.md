@@ -55,8 +55,8 @@ The Phase 4b.2 mainloop uses **Ampere-style register MMA** (`SM80_16x8x16_F32BF1
 **Phase 5.5 bench on RTX 5070 Ti at 8 COT shapes:** the SM120 tile (`GemmCbfloat16Sm120`, 128x128x32, the only variant) is **3-4× slower than the best SM80 tile** at every shape; cmm-triton remains 1.2-2× faster than the best cmm-cutlass tile. The SM80 tile autotune winner is tile 3 (64x64x32) on every COT shape. The SM120 kernel runs correctly (max abs diff vs SM80 < 0.5 across shapes — within bf16 tolerance), but the perf gap confirms the design hypothesis: Ampere-class MMA + Blackwell TMA underperforms the standalone Ampere multistage path that the SM80 tiles use.
 
 **Phase 6 frontier (deferred):**
-1. Tile family expansion (SM120 variants at 64x64x32 / 64x128x32 / 128x64x32 to match the SM80 winners)
-2. SM90-GMMA-on-sm_120 mainloop variant (descriptor-based A/B from smem, register accumulator) — same TMA/smem machinery, different MMA pattern, leverages actual Blackwell-class hardware
+1. ✓ Tile family expansion (Phase 6.1 — SM120 variants at 64x64x32 / 64x128x32 / 128x64x32 — tile 7 wins every COT shape)
+2. ✗ SM90-GMMA-on-sm_120 mainloop variant — **NOT POSSIBLE on consumer Blackwell**. Phase 6.2 attempt confirmed via NVIDIA ptxas: `Instruction 'wgmma.mma_async with floating point types' not supported on .target 'sm_120a'`. Hopper WGMMA (`wgmma.fence`, `wgmma.mma_async`, `wgmma.commit_group`) is not implemented in consumer Blackwell SASS — only datacenter Blackwell (sm_100) inherits Hopper WGMMA. Consumer Blackwell's wgmma-equivalent is the SM120-family-specific atoms (used by `sm120_mma_builder.inl` for f8/f6/f4), but those don't include bf16. So bf16 register MMA via Ampere `mma.sync.aligned.m16n8k16` is the *only* available compute instruction for bf16 on sm_120.
 
 ### What 4b shipped that IS useful right now
 
