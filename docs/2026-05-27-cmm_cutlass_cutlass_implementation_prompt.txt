@@ -1,0 +1,278 @@
+# Task: Implement Complex bfloat16 Matrix Multiply in NVIDIA CUTLASS
+
+## Goal
+
+Add native complex bfloat16 (cbfloat16) GEMM support to CUTLASS using real bf16 tensor-core
+MMA instructions. The result should be:
+1. Buildable locally against the CUTLASS header-only library today
+2. Correct (numerically verified against a reference)
+3. Structured as a clean, upstreamable PR to nvidia/cutlass
+
+This is a self-contained C++ / CUDA implementation task. No Python, no PyTorch, no Triton.
+The Python binding comes later in a separate package (cmm-cutlass). This task ends at a
+working, tested CUDA program.
+
+---
+
+## Background: What cbfloat16 GEMM Means
+
+A complex matrix multiply C = A * B where A, B, C ∈ C^(M×K), C^(K×N), C^(M×N) expands as:
+
+    Re(C) = Re(A) * Re(B) - Im(A) * Im(B)
+    Im(C) = Re(A) * Im(B) + Im(A) * Re(B)
+
+This is implemented using FOUR real bf16 MMA calls per warp tile:
+
+    mma(acc_r,  w_r,  z_r, acc_r)   // acc_r += Re(A) * Re(B)
+    mma(acc_r, -w_i,  z_i, acc_r)   // acc_r -= Im(A) * Im(B)
+    mma(acc_i,  w_i,  z_r, acc_i)   // acc_i += Im(A) * Re(B)
+    mma(acc_i,  w_r,  z_i, acc_i)   // acc_i += Re(A) * Im(B)
+
+Critical correctness note: the FOURTH mma writes to acc_i (imaginary accumulator), NOT acc_r.
+This is a common transcription error. Double-check every implementation against this formula.
+
+Re(A) and Im(A) are loaded into registers ONCE and reused for both acc_r and acc_i
+accumulations — this halves HBM traffic for A versus loading them separately.
+
+Accumulators MUST be fp32. bf16 accumulation overflows for typical GEMM sizes.
+Input tiles (A, B) are bf16. Output (C) is fp32, written back by the caller.
+
+The PTX instruction used is: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
+
+---
+
+## Repository Setup
+
+Start from a CUTLASS fork. Do NOT modify CUTLASS core files — add only new files.
+CUTLASS is a header-only library; your additions are also header-only where possible.
+
+Minimum CUTLASS version: 3.x (uses CuTe abstractions). If you need to target CUTLASS 2.x
+for broader compatibility, implement for 2.x first and note the 3.x migration path.
+
+Directory structure for your additions:
+
+    include/cutlass/gemm/collective/
+        cbfloat16_mma_policy.h          ← warp-level MMA policy (main new file)
+
+    include/cutlass/gemm/kernel/
+        default_gemm_cbfloat16.h        ← kernel instantiation
+
+    include/cutlass/
+        cbfloat16.h                     ← type alias + storage struct (if needed)
+
+    test/unit/gemm/device/
+        gemm_cbfloat16_bf16_f32_tensor_op_sm80.cu  ← correctness + perf test
+
+    examples/
+        cbfloat16_gemm/
+            cbfloat16_gemm.cu           ← standalone runnable example
+            CMakeLists.txt
+
+---
+
+## What to Implement
+
+### 1. Storage convention
+
+Complex matrices are stored in PLANAR (block) layout:
+
+    A_planar ∈ R^(M × 2K):  first K columns = Re(A), last K columns = Im(A)
+    B_planar ∈ R^(2K × N):  top K rows = Re(B), bottom K rows = Im(B)
+    C_planar ∈ R^(M × 2N):  first N columns = Re(C), last N columns = Im(C)
+
+This is the block layout used throughout the cmm-triton ecosystem. Do NOT use interleaved
+(Re0, Im0, Re1, Im1, ...) layout — it does not compose cleanly with the MMA tile structure.
+
+The planar layout means the GEMM logically operates on submatrices:
+
+    C_r = A_r * B_r - A_i * B_i      (top-left and top-right of C_planar)
+    C_i = A_i * B_r + A_r * B_i      (bottom-left and bottom-right of C_planar)
+
+### 2. `cbfloat16_mma_policy.h` — warp-level MMA policy
+
+This is the central file. Define a struct `CbfloatMmaPolicy` that:
+
+- Wraps the 4-MMA sequence above as a single warp-level operation
+- Matches the interface of CUTLASS's existing `MmaTensorOpPolicy` so the higher-level
+  tiling and scheduling infrastructure (threadblock, warp, pipeline) can treat complex bf16
+  GEMM identically to real bf16 GEMM
+- Uses `nvcuda::wmma` or PTX `mma.sync` directly for the bf16 MMA calls
+- Accumulates in fp32 fragments (mandatory)
+- Keeps Re(A) and Im(A) tiles in shared memory / registers simultaneously to avoid
+  reloading them for the second pair of MMA calls
+
+Key interface requirements (match existing CUTLASS policy interface):
+
+    struct CbfloatMmaPolicy {
+        using MmaOp = ...;              // the underlying real bf16 MMA op
+        using Shape = ...;              // warp tile shape (M, N, K) for the complex op
+        using ElementA = cutlass::bfloat16_t;
+        using ElementB = cutlass::bfloat16_t;
+        using ElementC = float;         // fp32 accumulator, mandatory
+        using LayoutA = cutlass::layout::RowMajor;
+        using LayoutB = cutlass::layout::ColumnMajor;
+
+        // Execute one warp tile of complex bf16 GEMM
+        // a_real, a_imag: fragments of Re(A), Im(A) — loaded ONCE, reused
+        // b_real, b_imag: fragments of Re(B), Im(B)
+        // c_real, c_imag: fp32 accumulator fragments (in/out)
+        CUTLASS_DEVICE
+        void operator()(FragmentC &c_real, FragmentC &c_imag,
+                        FragmentA const &a_real, FragmentA const &a_imag,
+                        FragmentB const &b_real, FragmentB const &b_imag) const;
+    };
+
+The operator() body implements the 4-MMA sequence. Verify the fourth MMA writes to c_imag.
+
+### 3. `default_gemm_cbfloat16.h` — kernel instantiation
+
+Instantiate the standard CUTLASS `Gemm` kernel template with:
+- `CbfloatMmaPolicy` as the warp-level MMA
+- Threadblock shape: 128×128×32 (standard Ampere bf16 threadblock)
+- Warp shape: 64×64×32
+- Pipeline stages: 3 (software pipelining for Ampere)
+- Output: fp32 accumulators written to C_planar
+
+Provide a typedef `GemmCbfloat16` that is usable as:
+
+    cutlass::Status status = GemmCbfloat16::run(args, workspace, stream);
+
+where `args` encodes pointers to A_planar, B_planar, C_planar (all bf16/fp32 as appropriate),
+M, N, K (the complex dimensions — the planar dimensions are 2× these internally), and alpha/beta.
+
+### 4. Standalone example: `cbfloat16_gemm.cu`
+
+A single self-contained .cu file that:
+
+1. Allocates A_planar (M×2K bf16), B_planar (2K×N bf16), C_planar (M×2N fp32) on device
+2. Fills with known values (e.g. A = 1+2i everywhere, B = 3+4i everywhere)
+3. Runs GemmCbfloat16
+4. Computes reference C = A*B on CPU in double precision
+5. Checks |C_device - C_ref| < 1e-2 (bf16 precision budget)
+6. Prints PASS or FAIL with the max absolute error
+7. Prints achieved TFLOP/s (count 8*M*N*K FLOPs for complex GEMM: 4 real mults + 2 adds,
+   each complex output element)
+
+Use M=N=K=1024 for the default test size. Must run in under 5 seconds on any Ampere GPU.
+
+---
+
+## Correctness Requirements
+
+### Reference implementation (write this first, test against it)
+
+Before writing any CUTLASS code, write a CPU reference:
+
+```cpp
+// Reference: complex matmul in double precision
+void complex_mm_ref(
+    int M, int N, int K,
+    const double* Ar, const double* Ai,   // M×K
+    const double* Br, const double* Bi,   // K×N
+    double* Cr, double* Ci)               // M×N
+{
+    for (int m = 0; m < M; m++)
+        for (int n = 0; n < N; n++) {
+            double sr = 0, si = 0;
+            for (int k = 0; k < K; k++) {
+                sr += Ar[m*K+k]*Br[k*N+n] - Ai[m*K+k]*Bi[k*N+n];
+                si += Ar[m*K+k]*Bi[k*N+n] + Ai[m*K+k]*Br[k*N+n];
+            }
+            Cr[m*N+n] = sr;
+            Ci[m*N+n] = si;
+        }
+}
+```
+
+Verify your CUTLASS result against this. Acceptable tolerance: 1e-2 absolute for bf16 inputs
+(7 mantissa bits ≈ 0.8% relative error; accumulated over K=1024 the absolute error grows).
+
+### Numerical traps to avoid
+
+1. NEVER accumulate in bf16. The accumulator fragments must be fp32. Verify this in your
+   MMA policy — CUTLASS will silently compile with the wrong accumulator type.
+
+2. The negative sign on Im(A) in the second MMA call:
+       mma(acc_r, -w_i, z_i, acc_r)
+   must be applied to the FRAGMENT, not to the source matrix pointer.
+   Apply it as: negate the a_imag fragment before the second MMA pair, or use a dedicated
+   negated-fragment type. Do not negate in memory (that would corrupt the fragment used
+   in the third MMA call, which needs the original positive Im(A)).
+
+3. Thread synchronisation: all four MMA calls within a warp must complete before the next
+   tile iteration. CUTLASS's pipeline handles this if you use the standard warp-level
+   interface; if you drop to PTX directly, add __syncwarp() between tile iterations.
+
+---
+
+## Build Instructions to Include
+
+Provide a working CMakeLists.txt for the example that:
+
+```cmake
+cmake_minimum_required(VERSION 3.18)
+project(cbfloat16_gemm CUDA CXX)
+
+set(CMAKE_CUDA_ARCHITECTURES 80)          # Ampere minimum
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+
+# CUTLASS is header-only — point to your fork
+set(CUTLASS_DIR "/path/to/cutlass-fork"
+    CACHE PATH "Path to CUTLASS fork root")
+
+add_executable(cbfloat16_gemm cbfloat16_gemm.cu)
+target_include_directories(cbfloat16_gemm PRIVATE
+    ${CUTLASS_DIR}/include
+    ${CUTLASS_DIR}/tools/util/include)
+target_compile_options(cbfloat16_gemm PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:
+        --expt-relaxed-constexpr
+        -lineinfo
+        -O3>)
+```
+
+---
+
+## PR Readiness Requirements
+
+For the code to be upstreamable to nvidia/cutlass, it must:
+
+1. Follow CUTLASS naming conventions: `cutlass::` namespace, `PascalCase` types,
+   `snake_case` members, `CUTLASS_HOST_DEVICE` / `CUTLASS_DEVICE` decorators on all
+   device functions.
+
+2. Add a `using` alias or `struct` in `include/cutlass/cbfloat16.h` defining the
+   `CbfloatElement` type, mirroring how CUTLASS defines `complex<float>` in
+   `include/cutlass/complex.h`. Study that file before writing yours.
+
+3. Every new header must have the NVIDIA copyright header (Apache 2.0):
+   ```
+   /***************************************************************************************************
+    * Copyright (c) 2017 - 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    * SPDX-License-Identifier: BSD-3-Clause
+    * ...
+    **************************************************************************************************/
+   ```
+
+4. The test file must use the existing CUTLASS test harness
+   (`cutlass/util/reference/device/gemm_complex.h` for the reference) rather than a
+   hand-rolled reference, to match upstream test style.
+
+5. No modifications to any existing CUTLASS file — only additions.
+
+6. The implementation must compile cleanly with `-Wall -Wextra` (no new warnings).
+
+---
+
+## Deliverable Checklist
+
+- [ ] `include/cutlass/cbfloat16.h` — type definition
+- [ ] `include/cutlass/gemm/collective/cbfloat16_mma_policy.h` — warp MMA policy
+- [ ] `include/cutlass/gemm/kernel/default_gemm_cbfloat16.h` — kernel instantiation
+- [ ] `examples/cbfloat16_gemm/cbfloat16_gemm.cu` — standalone example, prints PASS/FAIL
+- [ ] `examples/cbfloat16_gemm/CMakeLists.txt` — builds with cmake + ninja
+- [ ] `test/unit/gemm/device/gemm_cbfloat16_bf16_f32_tensor_op_sm80.cu` — unit test
+
+When the example prints PASS and the TFLOP/s are within 1.5× of real bf16 torch.mm at the
+same M=N=K=1024, the implementation is ready for the Python binding step (cmm-cutlass).
