@@ -147,12 +147,31 @@ struct SmBuild {
 
 } // namespace cbfloat16_sm120_detail
 
-// Variant typedef (initially: just one variant for Phase 5.3 iteration).
-// Phase 5.5 expands to a tile family analogous to the SM100 header once the
-// first variant compiles + runs.
+// Variant typedefs. Tile family expanded in Phase 6.1 to match the SM80
+// tile shapes that win at COT shapes (per the Phase 5.5 bench). Order
+// mirrors the SM80 GemmCbfloat16Bf16Out family in default_gemm_cbfloat16.h
+// so the cmm-cutlass autotune can compare like-for-like.
 using DefaultGemmCbfloat16Sm120Kernel = typename
     cbfloat16_sm120_detail::SmBuild<
         cute::Shape<cute::_128, cute::_128, cute::_32>,
+        cute::Shape<cute::_1, cute::_1, cute::_1>
+    >::GemmKernel;
+
+using DefaultGemmCbfloat16Sm120Kernel_64x128 = typename
+    cbfloat16_sm120_detail::SmBuild<
+        cute::Shape<cute::_64, cute::_128, cute::_32>,
+        cute::Shape<cute::_1, cute::_1, cute::_1>
+    >::GemmKernel;
+
+using DefaultGemmCbfloat16Sm120Kernel_128x64 = typename
+    cbfloat16_sm120_detail::SmBuild<
+        cute::Shape<cute::_128, cute::_64, cute::_32>,
+        cute::Shape<cute::_1, cute::_1, cute::_1>
+    >::GemmKernel;
+
+using DefaultGemmCbfloat16Sm120Kernel_64x64 = typename
+    cbfloat16_sm120_detail::SmBuild<
+        cute::Shape<cute::_64, cute::_64, cute::_32>,
         cute::Shape<cute::_1, cute::_1, cute::_1>
     >::GemmKernel;
 
@@ -164,7 +183,10 @@ namespace device {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-using GemmCbfloat16Sm120 = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Sm120Kernel>;
+using GemmCbfloat16Sm120         = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Sm120Kernel>;
+using GemmCbfloat16Sm120_64x128  = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Sm120Kernel_64x128>;
+using GemmCbfloat16Sm120_128x64  = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Sm120Kernel_128x64>;
+using GemmCbfloat16Sm120_64x64   = GemmUniversalAdapter<kernel::DefaultGemmCbfloat16Sm120Kernel_64x64>;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
