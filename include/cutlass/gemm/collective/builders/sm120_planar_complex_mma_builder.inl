@@ -138,10 +138,16 @@ struct CollectiveBuilder<
                 "SM120 planar bf16 builder: ElementAccumulator must be float");
 
   // MMA atom: SM80 register MMA bf16xbf16 → fp32, m16n8k16 (TN — A row-major / B col-major).
-  // Wrapped in a 2x2 AtomLayoutMNK to give 128 threads per CTA (4 atoms × 32 threads).
+  // Wrapped in a 2x2 AtomLayoutMNK (128 threads per CTA) + a 32x32x16 tile
+  // permutation. The Tile<_32,_32,_16> third parameter to make_tiled_mma is
+  // required to get the per-thread operand count right for ldmatrix.x4
+  // (see examples/cute/tutorial/sgemm_sm80.cu pattern). Without it,
+  // make_tiled_copy_B fails the "too few vals for selected CopyAtom" check
+  // because the B atom only provides 4 bf16 per thread.
   using TiledMma = decltype(cute::make_tiled_mma(
       cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
-      cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>{}));
+      cute::Layout<cute::Shape<cute::_2, cute::_2, cute::_1>>{},
+      cute::Tile<cute::_32, cute::_32, cute::_16>{}));
 
   // Dual-TiledMma pair (for builder symmetry with the SM100 sibling).
   // SM120 register MMA has no ScaleIn::Neg descriptor flip; negation is done

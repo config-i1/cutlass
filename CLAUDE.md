@@ -48,16 +48,25 @@ Of the two paths considered:
 
 **Phase 5.2 deliverable target:** `include/cutlass/gemm/kernel/sm120_gemm_warpspecialized_planar_complex.hpp`. Producer warp loops over work tiles calling `mainloop.load()`. Consumer warp group allocates `(MMA, MMA_M, MMA_N, 2)` accumulator (via two `partition_fragment_C` calls composed into one rank-4 view, or via a custom partition helper), calls `mainloop.mma()` once per tile, calls `epilogue()` directly. `StaticPersistentTileScheduler` to match sm_120's smaller SM count.
 
-### Open architectural question (also for Phase 5)
+### Open architectural question (Phase 5.5 bench confirmed worth revisiting)
 
-The Phase 4b.2 mainloop uses **Ampere-style register MMA** (`SM80_16x8x16_F32BF16BF16F32_TN`, supported on sm_120 via legacy `mma.sync.aligned`). Consumer Blackwell bf16 in upstream CUTLASS uses **SM90 GMMA atoms** (descriptor-based, A/B read direct from smem). The register-MMA choice is correctness-first; if Phase 5 benches show insufficient perf win over the existing SM80 path, swap the `mma()` body for an SM90-GMMA-on-sm_120 variant (same TMA/smem machinery, different MMA pattern). The mainloop's class-level interfaces stay the same.
+The Phase 4b.2 mainloop uses **Ampere-style register MMA** (`SM80_16x8x16_F32BF16BF16F32_TN`, supported on sm_120 via legacy `mma.sync.aligned`). Consumer Blackwell bf16 in upstream CUTLASS uses **SM90 GMMA atoms** (descriptor-based, A/B read direct from smem). The register-MMA choice is correctness-first.
+
+**Phase 5.5 bench on RTX 5070 Ti at 8 COT shapes:** the SM120 tile (`GemmCbfloat16Sm120`, 128x128x32, the only variant) is **3-4× slower than the best SM80 tile** at every shape; cmm-triton remains 1.2-2× faster than the best cmm-cutlass tile. The SM80 tile autotune winner is tile 3 (64x64x32) on every COT shape. The SM120 kernel runs correctly (max abs diff vs SM80 < 0.5 across shapes — within bf16 tolerance), but the perf gap confirms the design hypothesis: Ampere-class MMA + Blackwell TMA underperforms the standalone Ampere multistage path that the SM80 tiles use.
+
+**Phase 6 frontier (deferred):**
+1. Tile family expansion (SM120 variants at 64x64x32 / 64x128x32 / 128x64x32 to match the SM80 winners)
+2. SM90-GMMA-on-sm_120 mainloop variant (descriptor-based A/B from smem, register accumulator) — same TMA/smem machinery, different MMA pattern, leverages actual Blackwell-class hardware
 
 ### What 4b shipped that IS useful right now
 
-Even without a runnable kernel, Phase 4b unblocks downstream work:
-- The Phase 4b.3 `collective_epilogue.hpp` missing-include fix is a strict upstream bugfix that future SM100 planar work needs anyway
-- The scaffolding (dispatch policy, mainloop, epilogue) locks in the type contract so Phase 5's kernel-layer template just needs to compose existing pieces
-- Type-system instantiation of `cutlass::gemm::device::GemmCbfloat16Sm120` fails with a clear "kernel-layer template missing" message instead of an opaque template error
+### What 4b + 5 shipped
+
+- Phase 4b.3 `collective_epilogue.hpp` missing-include fix — strict upstream bugfix
+- Full SM120 planar bf16 stack: dispatch policy + collective MMA + register-acc epilogue + kernel-layer + builder + `GemmCbfloat16Sm120` typedef
+- Wired into cmm-cutlass as tile_id=4; autotune correctly masks it on non-sm_120 hosts via `can_implement` rejection
+- Runtime-verified end-to-end correctness on RTX 5070 Ti (max abs diff vs SM80 < 0.5 across 8 COT shapes, within bf16 tolerance)
+- Perf trails the SM80 path by 3-4× — see "Open architectural question" above for the Phase 6 SM90-GMMA-on-sm_120 swap that would close the gap
 
 ---
 
